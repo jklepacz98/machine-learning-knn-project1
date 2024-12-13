@@ -1,1 +1,0 @@
-def fetch_movie_details

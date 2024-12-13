@@ -1,17 +1,18 @@
+import os.path
+
 import pandas as pd
+import numpy as np
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import MinMaxScaler
-
-from local.constants import TMDB_AUTHORIZATION
 from movie_api import MovieAPI
 
 
 def load_data():
-    train_data = pd.read_csv('movie/train.csv', sep=';', header=None)
-    movies = pd.read_csv('movie/movie.csv', sep=';', header=None)
-    tmdb_ids = movies.iloc[:, 1]
-    movie_ids = movies.iloc[:, 0]
-    return train_data, tmdb_ids, movie_ids
+    train_csv = pd.read_csv('movie/train.csv', sep=';', header=None)
+    train_csv.columns = ['id', 'user_id', 'movie_id', "rating"]
+    movie_csv = pd.read_csv('movie/movie.csv', sep=';', header=None)
+    movie_csv.columns = ['id', 'tmdb_id', 'title']
+    return train_csv, movie_csv
 
 
 def euclidean_distance(X, Y):
@@ -27,57 +28,108 @@ def jaccard_distance(X, Y):
     return 1 - jaccard_similarity
 
 
-def fetch_movie_details(tmdb_ids, movie_ids, api_key):
-    movie_api = MovieAPI(api_key=api_key)
-    movie_details_df = movie_api.fetch_multiple_movies(tmdb_ids, movie_ids)
+def fetch_movie_details(movie_csv):
+    movie_api = MovieAPI()
+    movie_details_df = movie_api.fetch_movies(movie_csv)
     return movie_details_df
 
 
-def knn1(user_id, train_set, validation_set, movie_details_dict):
-    filter_set = validation_set[validation_set.iloc[:, 1] == user_id]
-    validation_movie_ids = filter_set.iloc[:, 2].values
-    validation_ids = filter_set.iloc[:, 0].values
-    for validation_movie_id, validation_id in zip(validation_movie_ids, validation_ids):
-        print(validation_movie_id, validation_id)
-        knn2(user_id, train_set, validation_movie_id, validation_id, movie_details_dict)
+def calculate_distances(training_set, validation_set):
+    distance_data = []
+    distances_and_ratings = []
+    for _, x in validation_set.iterrows():
+        for _, y in training_set.iterrows():
+            distance = total_distance(x, y)
+            rating = y["rating"]
+            distances_and_ratings.append((distance, rating))
+        distances_and_ratings = sorted(distances_and_ratings)
+        distance_data.append(distances_and_ratings)
+    return distance_data
 
 
-def knn2(user_id, train_set, validation_movie_id, validation_id, movie_details_df):
-    filter_data = train_set[train_set.iloc[:, 1] == user_id]
-    train_movie_ids = filter_data.iloc[:, 2]
-    train_ratings = filter_data.iloc[:, 3]
+def find_best_k(distance_data, validation_set):
+    best_k = None
+    best_mae = float('inf')
+    correct_predictions_percentage = 0  # To store the percentage of good predictions
 
-    for train_movie_id in train_movie_ids:
-        total_distance(train_movie_id, validation_movie_id, movie_details_df)
-        # compare(validation_movie_id, train_movie_id)
+    for k in range(1, 40):
+        total_mae, correct_predictions, almost_correct_prediction = knn3(k, distance_data, validation_set)
+
+        avg_mae = total_mae / len(validation_set)
+        good_predictions_percentage = (correct_predictions / len(validation_set)) * 100
+        almost_correct_predictions_percentage = (almost_correct_prediction / len(validation_set)) * 100
+
+        # Update the best k if current k gives a lower average MAE
+        if avg_mae < best_mae:
+            best_k = k
+            best_mae = avg_mae
+            correct_predictions_percentage = good_predictions_percentage
+    print(f"Best k: {best_k}, "
+          f"Best MAE: {best_mae:.3f}, "
+          f"Good Predictions Percentage: {correct_predictions_percentage:.2f}%, "
+          f"Almost Correct Predictions Percentage: {almost_correct_predictions_percentage:.2f}%")
+    return best_k, correct_predictions_percentage, almost_correct_predictions_percentage
 
 
-def compute_numerical_distance(train_movie, validation_movie, numerical_features):
-    train_features = train_movie[numerical_features].to_numpy()
-    validation_features = validation_movie[numerical_features].to_numpy()
-    return euclidean_distance(train_features, validation_features)
+def knn2(training_set, validation_set):
+    distance_data = calculate_distances(training_set, validation_set)
+    best_k, correct_predictions_percentage, almost_correct_predictions_percentage = find_best_k(distance_data, validation_set)
+    return best_k, correct_predictions_percentage, almost_correct_predictions_percentage
 
-def compute_categorical_distance(train_movie, validation_movie, categorical_features):
-    train_features = train_movie[categorical_features].to_numpy()
-    validation_features = validation_movie[categorical_features].to_numpy()
+
+def knn(user_id, train_csv, movie_csv):
+    user_trains = train_csv[train_csv.iloc[:, 1] == user_id]
+    user_movies = pd.merge(user_trains, movie_csv, left_on=["movie_id"], right_on=["id"])
+
+    validation_size = int(len(user_movies) * 0.2)
+    validation_set = user_movies.iloc[:validation_size]
+    training_set = user_movies.iloc[validation_size:]
+
+    return knn2(training_set, validation_set)
+
+def knn3(k, distance_data, validation_set):
+    total_mae = 0
+    correct_predictions = 0
+    almost_correct_prediction = 0
+    for idx, x in enumerate(validation_set.iterrows()):
+        true_rating = x[1]["rating"]
+        distances_and_ratings = distance_data[idx]
+        nearest_neighbors = sorted(distances_and_ratings)[:k]
+        predicted_rating = np.mean([rating for _, rating in nearest_neighbors])
+        rounded_predicted_rating = round(predicted_rating)
+        mae = abs(true_rating - predicted_rating)
+        total_mae += mae
+        if rounded_predicted_rating == true_rating:
+            correct_predictions += 1
+        if abs(rounded_predicted_rating - true_rating) <= 1:
+            almost_correct_prediction += 1
+    return total_mae, correct_predictions, almost_correct_prediction
+
+
+def compute_numerical_distance(x, y, numerical_features):
+    x_features = x[numerical_features].to_numpy()
+    y_features = y[numerical_features].to_numpy()
+    return euclidean_distance(x_features, y_features)
+
+
+def compute_categorical_distance(x, y, categorical_features):
     distance = 0
     for categorical_feature in categorical_features:
-        distance += euclidean_distance()
-    return jaccard_distance(train_features, validation_features)
+        x_feature = set(x[categorical_feature])
+        y_feature = set(y[categorical_feature])
+        distance += jaccard_distance(x_feature, y_feature)
+    return distance
 
-def total_distance(train_movie_id, validation_movie_id, movie_details_df):
-    train_movie = movie_details_df[movie_details_df["movie_id"] == train_movie_id].iloc[0]
-    validation_movie = movie_details_df[movie_details_df["movie_id"] == validation_movie_id].iloc[0]
 
-    numerical_features = ["vote_average", "vote_count"]
-    numerical_distance = compute_numerical_distance(train_movie, validation_movie, numerical_features)
+def total_distance(x, y):
+    numerical_features = ["vote_average"]
+    numerical_distance = compute_numerical_distance(x, y, numerical_features)
 
-    categorical_features = ["genere"]
-    categorical_distance = compute_categorical_distance()
+    categorical_features = ["genres"]
+    categorical_distance = compute_categorical_distance(x, y, categorical_features)
 
-    distance = numerical_distance
-    print(f"train movie type: {type(train_movie)}")
-    print(f"distance: {distance}")
+    distance = categorical_distance + numerical_distance
+
     return distance
 
 
@@ -91,18 +143,20 @@ def normalize(df):
 
 
 def main():
-    # Load and prepare data
-    train_data, tmdb_ids, movie_ids = load_data()
-    train_set, validation_set = train_test_split(train_data, test_size=0.2, random_state=42)
-    movie_details_df = fetch_movie_details(tmdb_ids, movie_ids, TMDB_AUTHORIZATION)
-    movie_details_df = normalize(movie_details_df)
+    train_csv, movie_csv = load_data()
+    movie_df = fetch_movie_details(movie_csv)
+    movie_df = normalize(movie_df)
 
-    user_ids = train_data.iloc[:, 1].unique()
+    user_ids = train_csv['user_id'].unique()
+    accuracy = []
+    almost_accuracy = []
     for user_id in user_ids:
-        knn1(user_id, train_set, validation_set, movie_details_df)
-        break  # todo Delate later, only for testing
-    # for user_id in validation_set.:
-    #     knn(user_id, train_set, movie_id, movie_details_dd)
+        best_k, acc, acc1 = knn(user_id, train_csv, movie_df)
+        accuracy.append(acc)
+        almost_accuracy.append(acc1)
+
+    print(f"średnia dokładność {sum(accuracy) / len(accuracy)}")
+    print(f"średnia prawie dokładność {sum(almost_accuracy) / len(almost_accuracy)}")
 
 
 if __name__ == '__main__':
